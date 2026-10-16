@@ -27,7 +27,7 @@
 - **零拷贝传输桥（手机 Termux）**：Node.js 服务通过 Linux 抽象命名空间套接字（UNIX Domain Socket）直接读取视频流与写入触控指令，并通过开启了 `TCP_NODELAY` 的 HTTPS/WSS 加密通道向局域网推送。
 - **硬件解码与直通渲染（车机浏览器）**：车机 Chromium 浏览器利用 `WebCodecs API (VideoDecoder)` 调用座舱芯片硬解视频流；本教程提供两套经过实测的前端渲染引擎：
   - **主推版（2D Canvas 极速直通版，延迟 20~30ms）**：开启 `desynchronized: true` 绕过浏览器合成器排队，解码完微秒级直接上屏（不等待 `requestAnimationFrame`），并启用 `pointerrawupdate` 硬件级触控中断采样。
-  - **备选版（WebGL 垂直同步零撕裂版，延迟 35~50ms）**：采用单槽位信箱模式（Mailbox `latestFrame`）配合 `requestAnimationFrame` 严格对齐车机 60Hz VSync，画面 100% 零撕裂。
+  - **备选版（WebGL 垂直同步零撕裂版，延迟 45~50ms）**：采用单槽位信箱模式（Mailbox `latestFrame`）配合 `requestAnimationFrame` 严格对齐车机 60Hz VSync，画面 100% 零撕裂。
 
 ### 2. 方案优缺点一览
 
@@ -36,16 +36,14 @@
 | **延迟表现** | **20~30ms 天花板级超低延迟**，滑动跟手度媲美车机原生系统 | 2D 极速版在快速横滑桌面时偶有轻微扫描线撕裂（可切 WebGL 版消除） |
 | **画质与帧率** | **2560×1116 点对点满屏无黑边**，手机与车机同频锁定 60FPS | 依赖局域网质量，必须使用 5GHz Wi-Fi 频段 |
 | **触控反控** | **原生 10 指多点触控**，支持高德/百度地图双指丝滑缩放与旋转 | 手机物理屏幕熄灭后，手机本体的触摸层依然通电（需放置好防误触） |
-| **硬件成本** | **0 硬件改装成本**，无需购买采集卡、投屏盒，不拆车机不破线 | 门槛较高，强依赖手机 Root 权限、高通骁龙处理器与 AMOLED 屏幕 |
-| **车机交互** | 可添加为车机桌面独立图标，支持命令一键恢复手机正常竖屏 | 萤火虫系统级边缘手势（顶部下滑退全屏/底部上滑呼出 Dock）无法被网页屏蔽 |
 | **音频通道** | 视频流极致纯净，不占用额外无线带宽与解码耗时 | 网页端默认仅传画面，音频需通过手机连接车载蓝牙输出 |
 
 ---
 
-## 🛠️ 三、 软硬件与网络环境要求（含课前自检）
+##  三、 软硬件与网络环境要求（含课前自检）
 
 ### 1. 手机硬件要求
-- **处理器**：强烈推荐 **高通骁龙 855 / 865 / 870 / 888 / 8 Gen 1 及以上** 机型（作者实测主力机型：**一加 8 / OnePlus 8**）。代码中调用了高通专属硬件低延迟编码扩展，非高通芯片需删除该扩展参数。
+- **处理器**：强烈推荐 **高通骁龙 855 / 865 / 870 / 888 / 8 Gen 1 及以上** 机型（作者实测机型：**一加 8 LingeaOS 23.2 / OnePlus 8**）。代码中调用了高通专属硬件低延迟编码扩展，非高通芯片需删除该扩展参数。
 - **屏幕材质**：必须为 **AMOLED / OLED 屏幕**（“关闭手机背光零发热推流”功能依赖 OLED 像素自发光特性；LCD 屏幕关闭背光后液晶层仍工作且部分内核会挂起渲染管线）。
 - **Root 权限**：必须已刷入 **Magisk、KernelSU 或 APatch**，具备完整 `su` 权限。
 
@@ -57,7 +55,7 @@
 - **必须使用 5GHz Wi-Fi**：萤火虫车机开启 5GHz 车载热点，备用手机连接车机热点（严禁使用 2.4GHz，2.4GHz 受车载蓝牙同频干扰会导致严重掉帧断流）。
 - **首次部署外网要求**：在第五节第 1~2 步下载 Node.js 和依赖包时，请先让手机连接家里有外网的 Wi-Fi（或个人热点）。
 
-### ✅【课前硬件与 Root 权限自检】
+### 【课前硬件与 Root 权限自检】
 打开手机上的 **Termux**，复制以下自检命令并回车（首次运行会弹出 Magisk/KernelSU 超级用户授权提示，请勾选“永远记住”并点击 **允许/Grant**）：
 
 ```bash
@@ -68,13 +66,13 @@ su -c '
   ls -l /sys/class/backlight/*/brightness
 '
 ```
-> **🔍 结果验证（必看）**：
+> ** 结果验证（必看）**：
 > 1. 第一部分必须输出包含 `uid=0(root)` 的字样（若提示 `Permission denied` 说明未授予 Termux Root 权限）。
 > 2. 第二部分必须输出类似 `/sys/class/backlight/panel0-backlight/brightness` 的路径。确认无误后方可进入下一步。
 
 ---
 
-## ⚙️ 四、 安卓备用机必做的系统设置（含逐步验证）
+##  四、 安卓备用机必做的系统设置（含逐步验证）
 
 请严格按顺序在安卓备用机上完成以下系统设置：
 
@@ -95,7 +93,7 @@ su -c '
 4. **解除 Termux 电池后台限制**
    - 进入手机 `设置` -> `应用` -> `Termux` -> `电池（应用电池使用情况）`：设置为 **“无限制（Unrestricted / 不优化）”**，并在多任务界面将 Termux 卡片上锁。
 
-### ✅【系统设置底层加固与结果验证】
+### 【系统设置底层加固与结果验证】
 在 Termux 中复制运行以下命令，在系统底层永久关闭 Android 14~16 幽灵进程杀手（Phantom Process Killer）与后台 Wi-Fi 扫描：
 
 ```bash
@@ -109,13 +107,13 @@ su -c '
   echo "Phantom Process Monitor (Expected false): $(/system/bin/settings get global settings_enable_monitor_phantom_procs)"
 '
 ```
-> **🔍 结果验证**：终端最后两行必须分别输出 `0` 和 `false`。
+> ** 结果验证**：终端最后两行必须分别输出 `0` 和 `false`。
 
 ---
 
-## 💻 五、 核心环境安装与基础推流部署（含国内网络防坑验证）
+##  五、 核心环境安装与基础推流部署（含国内网络防坑验证）
 
-> **⚠️ 网络提示**：第 1 步和第 2 步需要从网络下载依赖包，请确保此时手机连接的是**能够正常访问互联网的 Wi-Fi 或手机流量**！
+> ** 网络提示**：第 1 步和第 2 步需要从网络下载依赖包，请确保此时手机连接的是**能够正常访问互联网的 Wi-Fi 或手机流量**！
 
 ### 第 1 步：切换 Termux 国内清华源并安装 Node.js 等基础工具
 
@@ -129,7 +127,7 @@ pkg update -y && pkg install -y nodejs openssl curl procps psmisc net-tools
 echo "=== Step 1 Verification ==="
 node -v && npm -v && openssl version
 ```
-> **🔍 第 1 步结果验证**：终端最后必须正常打印出三行版本号（如 `v20.x.x`、`10.x.x`、`OpenSSL 3.x.x`）。若提示 `command not found`，请检查手机网络连接后重试。
+> ** 第 1 步结果验证**：终端最后必须正常打印出三行版本号（如 `v20.x.x`、`10.x.x`、`OpenSSL 3.x.x`）。若提示 `command not found`，请检查手机网络连接后重试。
 
 ---
 
@@ -689,7 +687,7 @@ source ~/.bashrc
 echo "[+] Core scripts deployed successfully!"
 ```
 
-### ✅【第 3 步结果验证（必测）】
+### 【第 3 步结果验证（必测）】
 1. 在 Termux 中输入 **`start`** 并回车，随后运行以下状态检查命令：
    ```bash
    su -c 'ps -ef | grep -E "node|scrcpy" | grep -v grep && netstat -tulnp | grep 8443'
@@ -702,7 +700,7 @@ echo "[+] Core scripts deployed successfully!"
 
 ---
 
-## 🚗 六、 萤火虫车机端连接步骤与验证
+##  六、 萤火虫车机端连接步骤与验证
 
 1. **手机连接车机 5GHz 热点**
    - 确认备用手机已连接上萤火虫车机的 5GHz Wi-Fi 热点，并在 Termux 中运行了 `start`，记下终端显示的访问地址（例如 `[https://192.168.121.56:8443](https://192.168.121.56:8443)`）。
@@ -715,7 +713,7 @@ echo "[+] Core scripts deployed successfully!"
 
 ---
 
-## 🧩 七、 可选进阶模块（按需复制输入 Termux 即可生效）
+##  七、 可选进阶模块（按需复制输入 Termux 即可生效）
 
 当你在车机上验证画面与多指触控一切正常后，可根据需要复制以下独立模块到 Termux 中开启进阶功能。
 
@@ -729,7 +727,7 @@ touch /data/data/com.termux/files/home/car-ws/.screen_off
 start
 echo "[+] Auto screen-off enabled! (To disable anytime, run: rm -f ~/car-ws/.screen_off)"
 ```
-> **🔍 结果验证**：运行后等待 2 秒，观察手机屏幕是否彻底熄灭变黑，同时在车机浏览器上滑动画面依然丝滑响应；再在终端输入 `stop`，观察手机屏幕是否立即点亮并切回默认竖屏。
+> ** 结果验证**：运行后等待 2 秒，观察手机屏幕是否彻底熄灭变黑，同时在车机浏览器上滑动画面依然丝滑响应；再在终端输入 `stop`，观察手机屏幕是否立即点亮并切回默认竖屏。
 
 ---
 
@@ -767,11 +765,11 @@ INNER_EOF
 echo "=== Module B Verification ==="
 su -c 'ls -l /data/adb/service.d/car_ws_autostart.sh'
 ```
-> **🔍 结果验证**：终端输出 `-rwxr-xr-x ... /data/adb/service.d/car_ws_autostart.sh` 即代表挂载成功。
+> ** 结果验证**：终端输出 `-rwxr-xr-x ... /data/adb/service.d/car_ws_autostart.sh` 即代表挂载成功。
 
 ---
 
-## 🎨 八、 备选方案：60帧 WebGL 垂直同步零撕裂稳定版（Mailbox 模式）
+##  八、 备选方案：60帧 WebGL 垂直同步零撕裂稳定版（Mailbox 模式）
 
 第五节默认部署的是 **2D Canvas 极速直通版**（追求 20~30ms 物理极限低延迟，绕过垂直同步，但在快速左右滑动桌面时可能会有轻微的水平扫描线撕裂感）。
 
@@ -1225,7 +1223,7 @@ echo "[+] Switched to 60FPS WebGL Tear-Free Edition and restarted service!"
 
 ---
 
-## 🤖 九、 小白专属：AI 调试助手提示词（复制给任意 AI 帮你排错与定制）
+##  九、 小白专属：AI 调试助手提示词（复制给任意 AI 帮你排错与定制）
 
 如果你在部署过程中遇到任何报错，或者想让 AI 帮你在 **2D Canvas 极速版** 与 **WebGL 无撕裂版** 之间切换、调整分辨率/DPI 或适配其他品牌手机，只需把 **下方代码块内的英文提示词** 连同 **整篇教程（及你的终端报错信息）** 一起复制发送给任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等），AI 就会直接用中文手把手带你排错：
 
