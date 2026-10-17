@@ -741,24 +741,16 @@ echo "[+] Auto screen-off enabled! (To disable anytime, run: rm -f ~/car-ws/.scr
 
 ---
 
-### 可选模块 B：开启“开机与启动 Termux 自动运行推流”（免装额外 APK）
-- **作用**：配置 `.bashrc` 自检逻辑与 Magisk/KernelSU `service.d` 开机自启脚本。手机重启开机后（或首次点开 Termux 时），会自动检测并在后台拉起 `start.sh` 进入车载推流模式，**无需安装 `Termux:Boot` 等任何额外 APK**。
+### 可选模块 B：开启“开机与启动 Termux 自动运行推流”
+- **作用**：配置 `.bashrc` 自检逻辑与 Magisk/KernelSU `service.d` 开机自启脚本。手机重启开机后（或首次点开 Termux 时），会自动检测并在后台拉起 `start.sh` 进入车载推流模式。
 - **启用命令**：
 
 ```bash
-# 1. Configure ~/.bashrc auto-start check when Termux session initializes
 cat << 'EOF' > ~/.bashrc
 alias start='/data/data/com.termux/files/home/car-ws/start.sh'
 alias stop='/data/data/com.termux/files/home/car-ws/stop.sh'
-
-# Auto-start once per boot if server.js is not running
-if ! pgrep -f "node server.js" >/dev/null 2>&1 && [ ! -f /dev/.car_ws_started ]; then
-  su -c 'touch /dev/.car_ws_started' 2>/dev/null
-  /data/data/com.termux/files/home/car-ws/start.sh
-fi
 EOF
 
-# 2. Configure Magisk/KernelSU service.d script for background boot auto-start
 su -c '
   mkdir -p /data/adb/service.d
   cat << "INNER_EOF" > /data/adb/service.d/car_ws_autostart.sh
@@ -766,14 +758,12 @@ su -c '
 until [ "$(getprop sys.boot_completed)" = "1" ]; do
   sleep 2
 done
-sleep 5
-touch /dev/.car_ws_started
-su - $(stat -c "%U" /data/data/com.termux/files/home) -c "/data/data/com.termux/files/home/car-ws/start.sh"
+sleep 8
+
+su - $(stat -c "%U" /data/data/com.termux/files/home) -c "export PATH=/data/data/com.termux/files/usr/bin:/system/bin:/system/xbin:/vendor/bin:\$PATH; /data/data/com.termux/files/home/car-ws/start.sh"
 INNER_EOF
-  chmod +x /data/adb/service.d/car_ws_autostart.sh
+  chmod 755 /data/adb/service.d/car_ws_autostart.sh
 '
-echo "=== Module B Verification ==="
-su -c 'ls -l /data/adb/service.d/car_ws_autostart.sh'
 ```
 > ** 结果验证**：终端输出 `-rwxr-xr-x ... /data/adb/service.d/car_ws_autostart.sh` 即代表挂载成功。
 
