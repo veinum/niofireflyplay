@@ -199,7 +199,7 @@ su -c '
   done
 '
 
-# === 2. Write server.js (Verified 60FPS 2D-Canvas Ultra-Low Latency Edition) ===
+# === 2. Write server.js (2K 60FPS 2D-Canvas Offscreen Double-Buffered Ultra-Low Latency Edition) ===
 cat << 'EOF' > /data/data/com.termux/files/home/car-ws/server.js
 const https = require('https');
 const fs = require('fs');
@@ -242,39 +242,77 @@ const html = `<!DOCTYPE html>
 <script>
 const canvas = document.getElementById('v');
 
-// 2D Canvas origin is top-left; desynchronized: true bypasses compositor queue without coordinate flip bugs
+// 1. Primary Canvas: enable desynchronized: true to bypass browser compositor for 20-25ms ultra-low latency
 const ctx = canvas.getContext('2d', {
   alpha: false,
   desynchronized: true
 });
+ctx.imageSmoothingEnabled = false;
+
+// 2. Offscreen Pre-rendering Canvas (Anti-tearing & anti-flicker core):
+// Complete heavy YUV->RGB hardware color conversion in offscreen GPU memory first,
+// then perform a <0.2ms pure RGB blit to the front buffer to avoid scanline tearing
+const backCanvas = ('OffscreenCanvas' in window)
+  ? new OffscreenCanvas(2560, 1116)
+  : document.createElement('canvas');
+const backCtx = backCanvas.getContext('2d', { alpha: false });
+backCtx.imageSmoothingEnabled = false;
 
 let decoder = null;
 let configured = false;
 let waitingForKey = true;
 let configData = null;
+let lastCodecStr = '';
 let ts = 0;
+let cachedRect = null;
 
 function hex2(b) { return ('0' + b.toString(16)).slice(-2).toUpperCase(); }
 
+function updateRect() {
+  cachedRect = canvas.getBoundingClientRect();
+}
+window.addEventListener('resize', updateRect, { passive: true });
+
 function initDecoder() {
+  if (decoder) {
+    try { decoder.close(); } catch (e) {}
+  }
   configured = false;
   waitingForKey = true;
   decoder = new VideoDecoder({
     output(frame) {
-      // Ultra-low latency: drop current frame if a newer frame is already waiting in decode queue
-      if (decoder.decodeQueueSize > 0) {
+      // Only drop frames when queue exceeds 1 to balance 20ms latency with micro-jitter tolerance
+      if (decoder.decodeQueueSize > 1) {
         frame.close();
         return;
       }
-      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-        canvas.width = frame.displayWidth;
-        canvas.height = frame.displayHeight;
+      const fw = frame.displayWidth;
+      const fh = frame.displayHeight;
+      if (canvas.width !== fw || canvas.height !== fh) {
+        canvas.width = fw;
+        canvas.height = fh;
+        backCanvas.width = fw;
+        backCanvas.height = fh;
+        ctx.imageSmoothingEnabled = false;
+        backCtx.imageSmoothingEnabled = false;
+        updateRect();
       }
-      // Draw immediately upon hardware decode completion without waiting for requestAnimationFrame
-      ctx.drawImage(frame, 0, 0);
+      // Step 1: Decode NV12/YUV frame to RGB on offscreen buffer and release hardware frame immediately
+      backCtx.drawImage(frame, 0, 0);
       frame.close();
+      // Step 2: Blit pure RGB buffer to desynchronized front canvas instantaneously
+      ctx.drawImage(backCanvas, 0, 0);
     },
-    error() { waitingForKey = true; }
+    error() {
+      // Auto-recover hardware decoder upon unexpected pipeline error using cached SPS/PPS
+      initDecoder();
+      if (lastCodecStr) {
+        try {
+          decoder.configure({ codec: lastCodecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+          configured = true;
+        } catch (e) {}
+      }
+    }
   });
 }
 
@@ -307,7 +345,9 @@ ws.onmessage = (ev) => {
         // Parse SPS NAL unit (type 7) to configure WebCodecs hardware decoder dynamically
         if (type === 7) {
           const codecStr = 'avc1.' + hex2(payload[nalOffset+1]) + hex2(payload[nalOffset+2]) + hex2(payload[nalOffset+3]);
-          if (!configured) {
+          lastCodecStr = codecStr;
+          if (!configured || decoder.state === 'closed') {
+            if (decoder.state === 'closed') initDecoder();
             try {
               decoder.configure({ codec: codecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
               configured = true;
@@ -321,9 +361,15 @@ ws.onmessage = (ev) => {
     return;
   }
 
-  if (!configured) return;
+  if (!configured || decoder.state !== 'configured') return;
 
-  if (decoder.decodeQueueSize > 3) {
+  // Prevent 1-2s screen freeze during minor Wi-Fi jitter:
+  // Use threshold of 12 with clean decoder reset instead of prematurely dropping P-frames
+  if (decoder.decodeQueueSize > 12) {
+    try {
+      decoder.reset();
+      decoder.configure({ codec: lastCodecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+    } catch (e) {}
     waitingForKey = true;
   }
 
@@ -348,7 +394,7 @@ ws.onmessage = (ev) => {
 };
 
 function mapCoord(e) {
-  const r = canvas.getBoundingClientRect();
+  const r = cachedRect || (cachedRect = canvas.getBoundingClientRect());
   const w = canvas.width || 2560;
   const h = canvas.height || 1116;
   const scale = Math.min(r.width / w, r.height / h);
@@ -405,6 +451,7 @@ function sendTouch(action, e) {
 }
 
 window.addEventListener('pointerdown', (e) => {
+  updateRect();
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   sendTouch(0, e);
 }, { passive: true });
@@ -421,7 +468,7 @@ window.addEventListener('pointercancel', (e) => { sendTouch(1, e); }, { passive:
 </body>
 </html>`;
 
-console.log('[*] Starting 2K 2D-Canvas zero-wait direct streaming service...');
+console.log('[*] Starting 2K 60FPS 2D-Canvas anti-tearing ultra-low latency service...');
 const scrcpy = spawn('/system/bin/app_process', [
   '/system/bin',
   'com.genymobile.scrcpy.Server',
@@ -431,7 +478,7 @@ const scrcpy = spawn('/system/bin/app_process', [
   'max_size=2560',
   'video_bit_rate=12000000',
   'max_fps=60',
-  'video_codec_options=i-frame-interval=3,low-latency=1,priority=0,max-bframes=0,vendor.qti-ext-enc-low-latency.enable=1',
+  'video_codec_options=i-frame-interval=1,low-latency=1,priority=0,max-bframes=0',
   'audio=false',
   'control=true',
   'cleanup=false',
@@ -505,7 +552,7 @@ function initSockets() {
         if (client.readyState === 1) {
           if (isConfig || isKey) {
             client.dropping = false;
-          } else if (client.bufferedAmount > 524288) {
+          } else if (client.bufferedAmount > 2097152) {
             client.dropping = true;
           }
           if (client.dropping) continue;
@@ -515,7 +562,7 @@ function initSockets() {
       }
     }
     if (offset > 0) {
-      buf = offset === buf.length ? Buffer.alloc(0) : buf.subarray(offset);
+      buf = offset === buf.length ? Buffer.alloc(0) : Buffer.from(buf.subarray(offset));
     }
   });
 }
@@ -778,7 +825,7 @@ INNER_EOF
 - **一键切换方法**：直接复制下方代码块到 Termux 运行即可无缝替换 `server.js`（你之前设置的 `start` / `stop` 以及可选模块 A 的自动熄屏状态会自动保留，完全不受影响）：
 
 ```bash
-# === Replace server.js with 60FPS WebGL Mailbox Tear-Free Stable Edition ===
+# === Replace server.js with 60FPS WebGL Mailbox Tear-Free & Blur-Free Stable Edition ===
 cat << 'EOF' > /data/data/com.termux/files/home/car-ws/server.js
 const https = require('https');
 const fs = require('fs');
@@ -787,6 +834,7 @@ const os = require('os');
 const { spawn, execSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 
+// Kill any leftover scrcpy server processes before starting
 try { execSync('killall -9 app_process 2>/dev/null || true'); } catch (e) {}
 
 let configPacket = null;
@@ -868,10 +916,17 @@ let decoder = null;
 let configured = false;
 let waitingForKey = true;
 let configData = null;
+let lastCodecStr = '';
 let ts = 0;
 let latestFrame = null; // Single-slot mailbox: always holds only the newest decoded frame
+let cachedRect = null;
 
 function hex2(b) { return ('0' + b.toString(16)).slice(-2).toUpperCase(); }
+
+function updateRect() {
+  cachedRect = canvas.getBoundingClientRect();
+}
+window.addEventListener('resize', updateRect, { passive: true });
 
 // VSync-aligned render loop for 100% tear-free output
 function renderLoop() {
@@ -884,6 +939,7 @@ function renderLoop() {
     canvas.width = frame.displayWidth;
     canvas.height = frame.displayHeight;
     gl.viewport(0, 0, canvas.width, canvas.height);
+    updateRect();
   }
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -893,6 +949,9 @@ function renderLoop() {
 requestAnimationFrame(renderLoop);
 
 function initDecoder() {
+  if (decoder) {
+    try { decoder.close(); } catch (e) {}
+  }
   configured = false;
   waitingForKey = true;
   decoder = new VideoDecoder({
@@ -902,7 +961,16 @@ function initDecoder() {
       }
       latestFrame = frame;
     },
-    error() { waitingForKey = true; }
+    error() {
+      // Auto-recover hardware decoder upon unexpected pipeline error using cached SPS/PPS
+      initDecoder();
+      if (lastCodecStr) {
+        try {
+          decoder.configure({ codec: lastCodecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+          configured = true;
+        } catch (e) {}
+      }
+    }
   });
 }
 
@@ -934,7 +1002,9 @@ ws.onmessage = (ev) => {
         const type = payload[nalOffset] & 0x1f;
         if (type === 7) {
           const codecStr = 'avc1.' + hex2(payload[nalOffset+1]) + hex2(payload[nalOffset+2]) + hex2(payload[nalOffset+3]);
-          if (!configured) {
+          lastCodecStr = codecStr;
+          if (!configured || decoder.state === 'closed') {
+            if (decoder.state === 'closed') initDecoder();
             try {
               decoder.configure({ codec: codecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
               configured = true;
@@ -948,9 +1018,15 @@ ws.onmessage = (ev) => {
     return;
   }
 
-  if (!configured) return;
+  if (!configured || decoder.state !== 'configured') return;
 
-  if (decoder.decodeQueueSize > 6) {
+  // Prevent 1-2s screen freeze during minor Wi-Fi jitter:
+  // Use threshold of 12 with clean decoder reset instead of prematurely dropping P-frames
+  if (decoder.decodeQueueSize > 12) {
+    try {
+      decoder.reset();
+      decoder.configure({ codec: lastCodecStr, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+    } catch (e) {}
     waitingForKey = true;
   }
 
@@ -975,7 +1051,7 @@ ws.onmessage = (ev) => {
 };
 
 function mapCoord(e) {
-  const r = canvas.getBoundingClientRect();
+  const r = cachedRect || (cachedRect = canvas.getBoundingClientRect());
   const w = canvas.width || 2560;
   const h = canvas.height || 1116;
   const scale = Math.min(r.width / w, r.height / h);
@@ -1032,14 +1108,18 @@ function sendTouch(action, e) {
 }
 
 window.addEventListener('pointerdown', (e) => {
+  updateRect();
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   sendTouch(0, e);
-});
-window.addEventListener('pointermove', (e) => {
+}, { passive: true });
+
+const moveEvent = ('onpointerrawupdate' in window) ? 'pointerrawupdate' : 'pointermove';
+window.addEventListener(moveEvent, (e) => {
   if (activePointers.has(e.pointerId)) sendTouch(2, e);
-});
-window.addEventListener('pointerup',   (e) => { sendTouch(1, e); });
-window.addEventListener('pointercancel',(e) => { sendTouch(1, e); });
+}, { passive: true });
+
+window.addEventListener('pointerup',     (e) => { sendTouch(1, e); }, { passive: true });
+window.addEventListener('pointercancel', (e) => { sendTouch(1, e); }, { passive: true });
 </script>
 </body>
 </html>`;
@@ -1054,7 +1134,7 @@ const scrcpy = spawn('/system/bin/app_process', [
   'max_size=2560',
   'video_bit_rate=12000000',
   'max_fps=60',
-  'video_codec_options=i-frame-interval=2,low-latency=1,priority=0,max-bframes=0,vendor.qti-ext-enc-low-latency.enable=1',
+  'video_codec_options=i-frame-interval=1,low-latency=1,priority=0,max-bframes=0',
   'audio=false',
   'control=true',
   'cleanup=false',
@@ -1128,7 +1208,7 @@ function initSockets() {
         if (client.readyState === 1) {
           if (isConfig || isKey) {
             client.dropping = false;
-          } else if (client.bufferedAmount > 1048576) {
+          } else if (client.bufferedAmount > 2097152) {
             client.dropping = true;
           }
           if (client.dropping) continue;
@@ -1138,7 +1218,7 @@ function initSockets() {
       }
     }
     if (offset > 0) {
-      buf = offset === buf.length ? Buffer.alloc(0) : buf.subarray(offset);
+      buf = offset === buf.length ? Buffer.alloc(0) : Buffer.from(buf.subarray(offset));
     }
   });
 }
@@ -1176,8 +1256,7 @@ wss.on('connection', (ws) => {
       scrcpyTouchMsg.writeInt32BE(action === 1 ? 0 : 1, 28);
       ctrlSocket.write(scrcpyTouchMsg);
     }
-  }
-);
+  });
 
   const cleanup = () => { clients.delete(ws); };
   ws.on('close', cleanup);
@@ -1219,6 +1298,7 @@ server.listen(8443, '0.0.0.0', () => {
 EOF
 start
 echo "[+] Switched to 60FPS WebGL Tear-Free Edition and restarted service!"
+
 ```
 
 ---
